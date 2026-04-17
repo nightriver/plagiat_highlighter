@@ -210,13 +210,15 @@ def rewrite_cell(cell, annotated: list, token_result: list,
     annotated  — весь список параграфів з зонами {'para':..., 'zone': 'plain'|'text'}
     token_result — вже підсвічені токени тільки для 'text'-зони: [(token, para_idx, status)]
 
-    Логіка:
-    1. Очистити ячейку.
-    2. Пройтись annotated порядком.
-       - 'plain': записати текст як є без підсвічування.
-       - 'text': взяти наступний параграф з token_result і вивести токени з підсвічуванням.
+    ВАЖЛИВО: тексти plain-параграфів зберігаємо ДО будь-яких змін у DOM,
+    бо annotated[0]['para'] і first_para — це один і той самий Python-об'єкт.
+    Після first_para.clear() para.text вертав би '' для першого параграфа,
+    що призводило до втрати номера сторінки (ліва) і бібліографії (права).
     """
-    # Очистити ячейку
+    # ── 1. Зберегти тексти plain-параграфів ДО будь-яких змін ──────────────
+    saved_texts = [entry['para'].text for entry in annotated]
+
+    # ── 2. Очистити ячейку (залишити лише перший <w:p>) ─────────────────────
     tc = cell._tc
     ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     for p in tc.findall(f'{{{ns}}}p')[1:]:
@@ -224,10 +226,10 @@ def rewrite_cell(cell, annotated: list, token_result: list,
     first_para = cell.paragraphs[0]
     first_para.clear()
     current_para = first_para
-    first_used = False  # перший параграф вже є в ячейці
+    first_used = False
 
-    # Ітератор по токенах text-зони, згрупованих по para_idx
-    # Створюємо словник: para_idx (0..N-1 в text_paras) → [(token, status)]
+    # ── 3. Побудувати карту токенів для text-зони ────────────────────────────
+    # para_idx тут — індекс серед text-параграфів (0, 1, 2, …)
     text_para_map = {}
     for token, para_idx, status in token_result:
         if token == '\n':
@@ -236,8 +238,8 @@ def rewrite_cell(cell, annotated: list, token_result: list,
 
     text_para_counter = 0  # лічильник серед text-параграфів
 
-    for entry in annotated:
-        para = entry['para']
+    # ── 4. Записати всі параграфи ────────────────────────────────────────────
+    for entry_idx, entry in enumerate(annotated):
         zone = entry['zone']
 
         if not first_used:
@@ -248,7 +250,8 @@ def rewrite_cell(cell, annotated: list, token_result: list,
             current_para = p
 
         if zone == 'plain':
-            run = p.add_run(para.text)
+            # Використовуємо збережений текст, а не entry['para'].text
+            run = p.add_run(saved_texts[entry_idx])
             run.font.name = font_name
             run.font.size = Pt(font_size)
             run.bold = False
