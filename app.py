@@ -12,8 +12,8 @@ with st.expander("⚙️ Налаштування"):
         "Поріг схожості слів (%)", 60, 100, 75,
         help="75% — оптимально для морфології укр. мови. 'суд'/'суду' = збіг."
     )
-    font_name = st.selectbox("Шрифт", ["Times New Roman", "Calibri", "Arial"], index=0)
-    font_size = st.number_input("Розмір шрифту (pt)", 8, 16, 12)
+    font_name = st.selectbox("Шрифт", ["Calibri", "Times New Roman", "Arial"], index=0)
+    font_size = st.number_input("Розмір шрифту (pt)", 8, 16, 14)
 
 if uploaded_file and st.button("🚀 Обробити файл", type="primary"):
     progress_bar = st.progress(0, text="Починаємо обробку...")
