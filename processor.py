@@ -158,10 +158,30 @@ def align_tokens(left_pairs: list, right_pairs: list, threshold: float = 75.0) -
             for i in range(i1, i2): left_status[i]  = 'match'
             for j in range(j1, j2): right_status[j] = 'match'
         elif opcode == 'replace':
-            for i, j in zip(range(i1, i2), range(j1, j2)):
-                if fuzzy_match(left_keys[i], right_keys[j], threshold):
+            # zip() обробляє лише пари 1-до-1 і ігнорує "зайві" слова в
+            # асиметричних блоках (наприклад, [дотримання] → [за, дотриманням]).
+            # Натомість шукаємо найкраще fuzzy-співпадіння для кожного лівого
+            # слова серед УСІХ правих слів блоку (і навпаки).
+            right_matched = set()
+            for i in range(i1, i2):
+                best_j = None
+                best_ratio = -1.0
+                for j in range(j1, j2):
+                    if j in right_matched:
+                        continue
+                    a, b = left_keys[i], right_keys[j]
+                    if not a or not b:
+                        continue
+                    min_len = min(len(a), len(b))
+                    eff_threshold = 70.0 if min_len <= 4 else threshold
+                    ratio = Levenshtein.normalized_similarity(a, b) * 100
+                    if ratio >= eff_threshold and ratio > best_ratio:
+                        best_ratio = ratio
+                        best_j = j
+                if best_j is not None:
                     left_status[i]  = 'match'
-                    right_status[j] = 'match'
+                    right_status[best_j] = 'match'
+                    right_matched.add(best_j)
 
     def rebuild(token_pairs, words, statuses):
         word_iter = iter(enumerate(words))
