@@ -16,10 +16,20 @@ def is_page_marker(text: str) -> bool:
     return bool(PAGE_MARKER_RE.match(t) or DASH_MARKER_RE.match(t))
 
 
+def normalize_hyphenated(text: str) -> str:
+    """
+    FIX 4: Нормалізує перенос у словах.
+    'Ін- тернет' → 'Інтернет', 'мере- жі' → 'мережі'
+    Патерн: слово + дефіс + (пробіл*) + слово → склеїти.
+    """
+    return re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
+
+
 def extract_left_paragraphs(cell) -> tuple:
     """
-    Параграфи між PAGE MARKER і першим порожнім параграфом.
-    Порожний параграф = початок коментарів складача (ігноруємо).
+    FIX 1: Повертає (marker_paras, text_paras, warning).
+    marker_paras — параграфи ДО і включно з PAGE MARKER (не підсвічуються).
+    text_paras   — параграфи між PAGE MARKER і першим порожнім (підсвічуються).
     """
     paragraphs = cell.paragraphs
     marker_idx = None
@@ -29,24 +39,27 @@ def extract_left_paragraphs(cell) -> tuple:
             break
 
     if marker_idx is None:
-        return [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
+        return [], [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
 
-    result = []
+    marker_paras = paragraphs[:marker_idx + 1]
+
+    text_paras = []
     for para in paragraphs[marker_idx + 1:]:
         if para.text.strip() == '':
             break
-        result.append(para)
+        text_paras.append(para)
 
-    return result, None
+    return list(marker_paras), text_paras, None
 
 
-COMMENT_RE = re.compile(r'^(\d+\.|\u041fосилання на:|\u0422ам само$)')
+COMMENT_RE = re.compile(r'^(\d+\.|Посилання на:|Там само$)')
 
 
 def extract_right_paragraphs(cell) -> tuple:
     """
-    Бібліографія → PAGE MARKER → текст оригіналу → (коментарі).
-    Беремо ОСТАННІЙ PAGE MARKER (бо бібліографія може містити 'С.').
+    FIX 1: Повертає (prefix_paras, text_paras, warning).
+    prefix_paras — бібліографія + URL + PAGE MARKER (не підсвічуються).
+    text_paras   — текст оригіналу після ОСТАННЬОГО PAGE MARKER (підсвічуються).
     """
     paragraphs = cell.paragraphs
     marker_idx = None
@@ -55,28 +68,32 @@ def extract_right_paragraphs(cell) -> tuple:
             marker_idx = i  # не break — шукаємо останній
 
     if marker_idx is None:
-        return [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
+        return [], [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
 
-    result = []
+    prefix_paras = list(paragraphs[:marker_idx + 1])
+
+    text_paras = []
     for para in paragraphs[marker_idx + 1:]:
         txt = para.text.strip()
         if not txt:
             continue
         if COMMENT_RE.match(txt):
             break
-        result.append(para)
+        text_paras.append(para)
 
-    return result, None
+    return prefix_paras, text_paras, None
 
 
 def tokenize_paragraphs(paragraphs: list) -> list:
     """
     Повертає [(token, para_idx), ...].
     '\n' між параграфами = маркер нового абзацу (не підсвічується).
+    FIX 4: текст кожного параграфа нормалізується через normalize_hyphenated.
     """
     result = []
     for idx, para in enumerate(paragraphs):
-        tokens = re.split(r'(\s+)', para.text)
+        text = normalize_hyphenated(para.text)
+        tokens = re.split(r'(\s+)', text)
         for t in tokens:
             if t:
                 result.append((t, idx))
@@ -106,6 +123,7 @@ def align_tokens(
     """
     Повертає [(token, para_idx, status), ...]
     status: 'match' | 'diff' | None (пробіл/пунктуація/перенос)
+    FIX 3: пробіли між двома підсвіченими словами отримують статус сусідів.
     """
     left_words  = [(t, i) for t, i in left_pairs  if is_word(t)]
     right_words = [(t, i) for t, i in right_pairs if is_word(t)]
@@ -144,9 +162,26 @@ def align_tokens(
                 result.append((token, para_idx, None))
         return result
 
-    return (
+    tokens_with_status = (
         rebuild(left_pairs,  left_words,  left_status),
-        rebuild(right_pairs, right_words, right_status)
+        rebuild(right_pairs, right_words, right_status),
+    )
+
+    # FIX 3: пробілу між двома словами з однаковим статусом → присвоїти цей статус
+    def fill_space_status(token_list):
+        result = list(token_list)
+        for i in range(1, len(result) - 1):
+            token, para_idx, status = result[i]
+            if status is None and token != '\n':
+                prev_status = result[i - 1][2]
+                next_status = result[i + 1][2]
+                if prev_status is not None and prev_status == next_status:
+                    result[i] = (token, para_idx, prev_status)
+        return result
+
+    return (
+        fill_space_status(tokens_with_status[0]),
+        fill_space_status(tokens_with_status[1]),
     )
 
 
@@ -156,12 +191,25 @@ HIGHLIGHT = {
 }
 
 
-def rewrite_cell(cell, token_result: list, font_name: str, font_size: int):
+def write_plain_paragraphs(cell, paragraphs, font_name: str, font_size: int):
     """
-    Очищає ячейку і записує токени з підсвічуванням.
-    token_result: [(token, para_idx, status), ...]
-    status: 'match' | 'diff' | None
-    Токен '\n' → створює новий параграф у ячейці.
+    FIX 1: Записує параграфи без підсвічування (маркер сторінки, бібліографія).
+    """
+    for para in paragraphs:
+        p = cell.add_paragraph()
+        run = p.add_run(para.text)
+        run.font.name = font_name
+        run.font.size = Pt(font_size)
+        run.bold = False
+        run.italic = False
+
+
+def rewrite_cell(cell, prefix_paras: list, token_result: list,
+                 font_name: str, font_size: int):
+    """
+    FIX 1: Очищає ячейку, спочатку записує prefix_paras (без підсвічування),
+    потім token_result (з підсвічуванням).
+    Токен '\n' → новий параграф.
     """
     tc = cell._tc
     ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -172,15 +220,24 @@ def rewrite_cell(cell, token_result: list, font_name: str, font_size: int):
     first_para.clear()
     current_para = first_para
 
+    # Спочатку — незмінені параграфи (маркер, бібліографія)
+    for para in prefix_paras:
+        run = current_para.add_run(para.text)
+        run.font.name = font_name
+        run.font.size = Pt(font_size)
+        run.bold = False
+        run.italic = False
+        current_para = cell.add_paragraph()
+
+    # Потім — підсвічений текст
     for token, para_idx, status in token_result:
         if token == '\n':
             current_para = cell.add_paragraph()
             continue
-
         run = current_para.add_run(token)
         run.font.name = font_name
         run.font.size = Pt(font_size)
-        run.bold   = False
+        run.bold = False
         run.italic = False
         run.font.highlight_color = HIGHLIGHT.get(status)
 
@@ -217,8 +274,8 @@ def process_document(
             stats['skipped'] += 1
             continue
 
-        left_paras,  warn_l = extract_left_paragraphs(left_cell)
-        right_paras, warn_r = extract_right_paragraphs(right_cell)
+        left_prefix,  left_paras,  warn_l = extract_left_paragraphs(left_cell)
+        right_prefix, right_paras, warn_r = extract_right_paragraphs(right_cell)
 
         for warn, side in [(warn_l, 'ліва'), (warn_r, 'права')]:
             if warn:
@@ -234,8 +291,8 @@ def process_document(
 
         left_result, right_result = align_tokens(left_pairs, right_pairs, threshold)
 
-        rewrite_cell(left_cell,  left_result,  font_name, font_size)
-        rewrite_cell(right_cell, right_result, font_name, font_size)
+        rewrite_cell(left_cell,  left_prefix,  left_result,  font_name, font_size)
+        rewrite_cell(right_cell, right_prefix, right_result, font_name, font_size)
 
         stats['processed'] += 1
 
