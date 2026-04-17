@@ -18,18 +18,29 @@ def is_page_marker(text: str) -> bool:
 
 def normalize_hyphenated(text: str) -> str:
     """
-    FIX 4: Нормалізує перенос у словах.
-    'Ін- тернет' → 'Інтернет', 'мере- жі' → 'мережі'
-    Патерн: слово + дефіс + (пробіл*) + слово → склеїти.
+    'Ін- тернет' → 'Інтернет'. прибирає переноси у словах.
     """
     return re.sub(r'(\w)-\s+(\w)', r'\1\2', text)
 
 
-def extract_left_paragraphs(cell) -> tuple:
+COMMENT_RE = re.compile(r'^(\d+\.|Посилання на:|Там само$)')
+URL_RE = re.compile(r'^https?://')
+
+
+# ---------------------------------------------------------------------------
+# Нова логіка: повертають ANNOTATED список всіх параграфів ячейки
+# кожен елемент: {'para': para, 'zone': 'text'|'plain'}
+# 'text'  = ці параграфи будуть підсвічуватись
+# 'plain' = ці параграфи переписуються без змін
+# ---------------------------------------------------------------------------
+
+def annotate_left_cell(cell) -> tuple:
     """
-    FIX 1: Повертає (marker_paras, text_paras, warning).
-    marker_paras — параграфи ДО і включно з PAGE MARKER (не підсвічуються).
-    text_paras   — параграфи між PAGE MARKER і першим порожнім (підсвічуються).
+    Ліва ячейка.
+    Зони:
+      - до PAGE MARKER (включно) → 'plain'
+      - параграфи після PAGE MARKER до першого порожнього → 'text'
+      - після порожнього (comment-зона) → 'plain'
     """
     paragraphs = cell.paragraphs
     marker_idx = None
@@ -39,27 +50,35 @@ def extract_left_paragraphs(cell) -> tuple:
             break
 
     if marker_idx is None:
-        return [], [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
+        annotated = [{'para': p, 'zone': 'text'} for p in paragraphs if p.text.strip()]
+        return annotated, "WARNING: page marker not found"
 
-    marker_paras = paragraphs[:marker_idx + 1]
+    annotated = []
+    # До маркера + сам маркер → plain
+    for i in range(marker_idx + 1):
+        annotated.append({'para': paragraphs[i], 'zone': 'plain'})
 
-    text_paras = []
+    # Після маркера: текст до першого порожнього
+    in_text = True
     for para in paragraphs[marker_idx + 1:]:
-        if para.text.strip() == '':
-            break
-        text_paras.append(para)
+        if in_text and para.text.strip() == '':
+            in_text = False
+            annotated.append({'para': para, 'zone': 'plain'})
+            continue
+        if in_text:
+            annotated.append({'para': para, 'zone': 'text'})
+        else:
+            annotated.append({'para': para, 'zone': 'plain'})
 
-    return list(marker_paras), text_paras, None
+    return annotated, None
 
 
-COMMENT_RE = re.compile(r'^(\d+\.|Посилання на:|Там само$)')
-
-
-def extract_right_paragraphs(cell) -> tuple:
+def annotate_right_cell(cell) -> tuple:
     """
-    FIX 1: Повертає (prefix_paras, text_paras, warning).
-    prefix_paras — бібліографія + URL + PAGE MARKER (не підсвічуються).
-    text_paras   — текст оригіналу після ОСТАННЬОГО PAGE MARKER (підсвічуються).
+    Права ячейка.
+    Зони:
+      - до ОСТАННЬОГО PAGE MARKER (включно) → 'plain'
+      - після аж до COMMENT_RE / кінця ячейки → 'text'
     """
     paragraphs = cell.paragraphs
     marker_idx = None
@@ -68,28 +87,35 @@ def extract_right_paragraphs(cell) -> tuple:
             marker_idx = i  # не break — шукаємо останній
 
     if marker_idx is None:
-        return [], [p for p in paragraphs if p.text.strip()], "WARNING: page marker not found"
+        annotated = [{'para': p, 'zone': 'text'} for p in paragraphs if p.text.strip()]
+        return annotated, "WARNING: page marker not found"
 
-    prefix_paras = list(paragraphs[:marker_idx + 1])
+    annotated = []
+    # До останнього маркера + сам маркер → plain
+    for i in range(marker_idx + 1):
+        annotated.append({'para': paragraphs[i], 'zone': 'plain'})
 
-    text_paras = []
+    # Після маркера: text до COMMENT_RE
     for para in paragraphs[marker_idx + 1:]:
         txt = para.text.strip()
         if not txt:
+            annotated.append({'para': para, 'zone': 'plain'})
             continue
         if COMMENT_RE.match(txt):
+            # Коментар і все після → plain
+            annotated.append({'para': para, 'zone': 'plain'})
+            # решта параграфів цього рядку теж plain
             break
-        text_paras.append(para)
+        annotated.append({'para': para, 'zone': 'text'})
 
-    return prefix_paras, text_paras, None
+    return annotated, None
 
+
+# ---------------------------------------------------------------------------
+# Токенізація / порівняння
+# ---------------------------------------------------------------------------
 
 def tokenize_paragraphs(paragraphs: list) -> list:
-    """
-    Повертає [(token, para_idx), ...].
-    '\n' між параграфами = маркер нового абзацу (не підсвічується).
-    FIX 4: текст кожного параграфа нормалізується через normalize_hyphenated.
-    """
     result = []
     for idx, para in enumerate(paragraphs):
         text = normalize_hyphenated(para.text)
@@ -115,16 +141,7 @@ def fuzzy_match(a: str, b: str, threshold: float) -> bool:
     return ratio >= effective_threshold
 
 
-def align_tokens(
-    left_pairs: list,
-    right_pairs: list,
-    threshold: float = 75.0
-) -> tuple:
-    """
-    Повертає [(token, para_idx, status), ...]
-    status: 'match' | 'diff' | None (пробіл/пунктуація/перенос)
-    FIX 3: пробіли між двома підсвіченими словами отримують статус сусідів.
-    """
+def align_tokens(left_pairs: list, right_pairs: list, threshold: float = 75.0) -> tuple:
     left_words  = [(t, i) for t, i in left_pairs  if is_word(t)]
     right_words = [(t, i) for t, i in right_pairs if is_word(t)]
 
@@ -138,10 +155,8 @@ def align_tokens(
 
     for opcode, i1, i2, j1, j2 in matcher.get_opcodes():
         if opcode == 'equal':
-            for i in range(i1, i2):
-                left_status[i] = 'match'
-            for j in range(j1, j2):
-                right_status[j] = 'match'
+            for i in range(i1, i2): left_status[i]  = 'match'
+            for j in range(j1, j2): right_status[j] = 'match'
         elif opcode == 'replace':
             for i, j in zip(range(i1, i2), range(j1, j2)):
                 if fuzzy_match(left_keys[i], right_keys[j], threshold):
@@ -162,12 +177,9 @@ def align_tokens(
                 result.append((token, para_idx, None))
         return result
 
-    tokens_with_status = (
-        rebuild(left_pairs,  left_words,  left_status),
-        rebuild(right_pairs, right_words, right_status),
-    )
+    left_res  = rebuild(left_pairs,  left_words,  left_status)
+    right_res = rebuild(right_pairs, right_words, right_status)
 
-    # FIX 3: пробілу між двома словами з однаковим статусом → присвоїти цей статус
     def fill_space_status(token_list):
         result = list(token_list)
         for i in range(1, len(result) - 1):
@@ -179,11 +191,12 @@ def align_tokens(
                     result[i] = (token, para_idx, prev_status)
         return result
 
-    return (
-        fill_space_status(tokens_with_status[0]),
-        fill_space_status(tokens_with_status[1]),
-    )
+    return fill_space_status(left_res), fill_space_status(right_res)
 
+
+# ---------------------------------------------------------------------------
+# Запис в ячейку
+# ---------------------------------------------------------------------------
 
 HIGHLIGHT = {
     'match': WD_COLOR_INDEX.YELLOW,
@@ -191,56 +204,70 @@ HIGHLIGHT = {
 }
 
 
-def write_plain_paragraphs(cell, paragraphs, font_name: str, font_size: int):
-    """
-    FIX 1: Записує параграфи без підсвічування (маркер сторінки, бібліографія).
-    """
-    for para in paragraphs:
-        p = cell.add_paragraph()
-        run = p.add_run(para.text)
-        run.font.name = font_name
-        run.font.size = Pt(font_size)
-        run.bold = False
-        run.italic = False
-
-
-def rewrite_cell(cell, prefix_paras: list, token_result: list,
+def rewrite_cell(cell, annotated: list, token_result: list,
                  font_name: str, font_size: int):
     """
-    FIX 1: Очищає ячейку, спочатку записує prefix_paras (без підсвічування),
-    потім token_result (з підсвічуванням).
-    Токен '\n' → новий параграф.
+    annotated  — весь список параграфів з зонами {'para':..., 'zone': 'plain'|'text'}
+    token_result — вже підсвічені токени тільки для 'text'-зони: [(token, para_idx, status)]
+
+    Логіка:
+    1. Очистити ячейку.
+    2. Пройтись annotated порядком.
+       - 'plain': записати текст як є без підсвічування.
+       - 'text': взяти наступний параграф з token_result і вивести токени з підсвічуванням.
     """
+    # Очистити ячейку
     tc = cell._tc
     ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
     for p in tc.findall(f'{{{ns}}}p')[1:]:
         tc.remove(p)
-
     first_para = cell.paragraphs[0]
     first_para.clear()
     current_para = first_para
+    first_used = False  # перший параграф вже є в ячейці
 
-    # Спочатку — незмінені параграфи (маркер, бібліографія)
-    for para in prefix_paras:
-        run = current_para.add_run(para.text)
-        run.font.name = font_name
-        run.font.size = Pt(font_size)
-        run.bold = False
-        run.italic = False
-        current_para = cell.add_paragraph()
-
-    # Потім — підсвічений текст
+    # Ітератор по токенах text-зони, згрупованих по para_idx
+    # Створюємо словник: para_idx (0..N-1 в text_paras) → [(token, status)]
+    text_para_map = {}
     for token, para_idx, status in token_result:
         if token == '\n':
-            current_para = cell.add_paragraph()
             continue
-        run = current_para.add_run(token)
-        run.font.name = font_name
-        run.font.size = Pt(font_size)
-        run.bold = False
-        run.italic = False
-        run.font.highlight_color = HIGHLIGHT.get(status)
+        text_para_map.setdefault(para_idx, []).append((token, status))
 
+    text_para_counter = 0  # лічильник серед text-параграфів
+
+    for entry in annotated:
+        para = entry['para']
+        zone = entry['zone']
+
+        if not first_used:
+            p = current_para
+            first_used = True
+        else:
+            p = cell.add_paragraph()
+            current_para = p
+
+        if zone == 'plain':
+            run = p.add_run(para.text)
+            run.font.name = font_name
+            run.font.size = Pt(font_size)
+            run.bold = False
+            run.italic = False
+        else:  # 'text'
+            tokens_for_para = text_para_map.get(text_para_counter, [])
+            text_para_counter += 1
+            for token, status in tokens_for_para:
+                run = p.add_run(token)
+                run.font.name = font_name
+                run.font.size = Pt(font_size)
+                run.bold = False
+                run.italic = False
+                run.font.highlight_color = HIGHLIGHT.get(status)
+
+
+# ---------------------------------------------------------------------------
+# Головна функція
+# ---------------------------------------------------------------------------
 
 def process_document(
     docx_bytes: bytes,
@@ -249,10 +276,6 @@ def process_document(
     font_size: int,
     progress_callback=None
 ) -> tuple:
-    """
-    Повертає: (result_bytes, warnings, stats)
-    stats = {'processed': int, 'warnings': int, 'skipped': int}
-    """
     warnings = []
     stats = {'processed': 0, 'warnings': 0, 'skipped': 0}
 
@@ -274,25 +297,28 @@ def process_document(
             stats['skipped'] += 1
             continue
 
-        left_prefix,  left_paras,  warn_l = extract_left_paragraphs(left_cell)
-        right_prefix, right_paras, warn_r = extract_right_paragraphs(right_cell)
+        left_annotated,  warn_l = annotate_left_cell(left_cell)
+        right_annotated, warn_r = annotate_right_cell(right_cell)
 
         for warn, side in [(warn_l, 'ліва'), (warn_r, 'права')]:
             if warn:
                 warnings.append(f"Рядок {row_idx + 1} ({side} колонка): {warn}")
                 stats['warnings'] += 1
 
-        if not left_paras or not right_paras:
+        left_text_paras  = [e['para'] for e in left_annotated  if e['zone'] == 'text']
+        right_text_paras = [e['para'] for e in right_annotated if e['zone'] == 'text']
+
+        if not left_text_paras or not right_text_paras:
             stats['skipped'] += 1
             continue
 
-        left_pairs  = tokenize_paragraphs(left_paras)
-        right_pairs = tokenize_paragraphs(right_paras)
+        left_pairs  = tokenize_paragraphs(left_text_paras)
+        right_pairs = tokenize_paragraphs(right_text_paras)
 
         left_result, right_result = align_tokens(left_pairs, right_pairs, threshold)
 
-        rewrite_cell(left_cell,  left_prefix,  left_result,  font_name, font_size)
-        rewrite_cell(right_cell, right_prefix, right_result, font_name, font_size)
+        rewrite_cell(left_cell,  left_annotated,  left_result,  font_name, font_size)
+        rewrite_cell(right_cell, right_annotated, right_result, font_name, font_size)
 
         stats['processed'] += 1
 
