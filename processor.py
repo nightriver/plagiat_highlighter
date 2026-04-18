@@ -125,7 +125,7 @@ class _EmptyPara:
 
 # Коефіцієнт середньої ширини символу відносно розміру шрифту.
 # Calibri/Arial: кирилиця трохи ширша за латиницю, ~0.55 добре апроксимує.
-_CHAR_WIDTH_FACTOR = 0.55
+_CHAR_WIDTH_FACTOR = 0.6
 
 
 def _estimate_visual_lines(text: str, chars_per_line: float) -> int:
