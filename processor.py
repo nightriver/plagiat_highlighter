@@ -112,6 +112,43 @@ def annotate_right_cell(cell) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Вертикальне вирівнювання: додає порожні рядки на початок лівої ячейки,
+# щоб текст починався на тій самій висоті, що й текст правої.
+# ---------------------------------------------------------------------------
+
+class _EmptyPara:
+    """Фіктивний параграф з порожнім текстом — лише для padding."""
+    text = ''
+
+
+def _count_leading_plain(annotated: list) -> int:
+    """Кількість 'plain'-параграфів до першого 'text'."""
+    count = 0
+    for e in annotated:
+        if e['zone'] == 'text':
+            break
+        count += 1
+    return count
+
+
+def pad_left_to_match_right(left_annotated: list, right_annotated: list) -> list:
+    """
+    Якщо права ячейка має більше plain-рядків перед текстом, ніж ліва —
+    вставляємо різницю порожніх plain-рядків на початок лівої.
+    Це зрівнює вертикальний старт обох текстових зон.
+    """
+    left_lead  = _count_leading_plain(left_annotated)
+    right_lead = _count_leading_plain(right_annotated)
+    padding    = right_lead - left_lead
+
+    if padding <= 0:
+        return left_annotated
+
+    pad_entries = [{'para': _EmptyPara(), 'zone': 'plain'} for _ in range(padding)]
+    return pad_entries + left_annotated
+
+
+# ---------------------------------------------------------------------------
 # Токенізація / порівняння
 # ---------------------------------------------------------------------------
 
@@ -158,10 +195,6 @@ def align_tokens(left_pairs: list, right_pairs: list, threshold: float = 75.0) -
             for i in range(i1, i2): left_status[i]  = 'match'
             for j in range(j1, j2): right_status[j] = 'match'
         elif opcode == 'replace':
-            # zip() обробляє лише пари 1-до-1 і ігнорує "зайві" слова в
-            # асиметричних блоках (наприклад, [дотримання] → [за, дотриманням]).
-            # Натомість шукаємо найкраще fuzzy-співпадіння для кожного лівого
-            # слова серед УСІХ правих слів блоку (і навпаки).
             right_matched = set()
             for i in range(i1, i2):
                 best_j = None
@@ -232,8 +265,6 @@ def rewrite_cell(cell, annotated: list, token_result: list,
 
     ВАЖЛИВО: тексти plain-параграфів зберігаємо ДО будь-яких змін у DOM,
     бо annotated[0]['para'] і first_para — це один і той самий Python-об'єкт.
-    Після first_para.clear() para.text вертав би '' для першого параграфа,
-    що призводило до втрати номера сторінки (ліва) і бібліографії (права).
     """
     # ── 1. Зберегти тексти plain-параграфів ДО будь-яких змін ──────────────
     saved_texts = [entry['para'].text for entry in annotated]
@@ -249,14 +280,13 @@ def rewrite_cell(cell, annotated: list, token_result: list,
     first_used = False
 
     # ── 3. Побудувати карту токенів для text-зони ────────────────────────────
-    # para_idx тут — індекс серед text-параграфів (0, 1, 2, …)
     text_para_map = {}
     for token, para_idx, status in token_result:
         if token == '\n':
             continue
         text_para_map.setdefault(para_idx, []).append((token, status))
 
-    text_para_counter = 0  # лічильник серед text-параграфів
+    text_para_counter = 0
 
     # ── 4. Записати всі параграфи ────────────────────────────────────────────
     for entry_idx, entry in enumerate(annotated):
@@ -270,7 +300,6 @@ def rewrite_cell(cell, annotated: list, token_result: list,
             current_para = p
 
         if zone == 'plain':
-            # Використовуємо збережений текст, а не entry['para'].text
             run = p.add_run(saved_texts[entry_idx])
             run.font.name = font_name
             run.font.size = Pt(font_size)
@@ -327,6 +356,9 @@ def process_document(
             if warn:
                 warnings.append(f"Рядок {row_idx + 1} ({side} колонка): {warn}")
                 stats['warnings'] += 1
+
+        # ── Вирівнювання: лівій ячейці додаємо порожні рядки зверху ─────────
+        left_annotated = pad_left_to_match_right(left_annotated, right_annotated)
 
         left_text_paras  = [e['para'] for e in left_annotated  if e['zone'] == 'text']
         right_text_paras = [e['para'] for e in right_annotated if e['zone'] == 'text']
