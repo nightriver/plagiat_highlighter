@@ -1,5 +1,6 @@
 import re
 import io
+import math
 from difflib import SequenceMatcher
 from docx import Document
 from docx.shared import Pt
@@ -114,6 +115,7 @@ def annotate_right_cell(cell) -> tuple:
 # ---------------------------------------------------------------------------
 # Вертикальне вирівнювання: додає порожні рядки на початок лівої ячейки,
 # щоб текст починався на тій самій висоті, що й текст правої.
+# Використовує оцінку візуальних рядків — враховує перенос тексту в колонці.
 # ---------------------------------------------------------------------------
 
 class _EmptyPara:
@@ -121,25 +123,53 @@ class _EmptyPara:
     text = ''
 
 
-def _count_leading_plain(annotated: list) -> int:
-    """Кількість 'plain'-параграфів до першого 'text'."""
-    count = 0
+# Коефіцієнт середньої ширини символу відносно розміру шрифту.
+# Calibri/Arial: кирилиця трохи ширша за латиницю, ~0.55 добре апроксимує.
+_CHAR_WIDTH_FACTOR = 0.55
+
+
+def _estimate_visual_lines(text: str, chars_per_line: float) -> int:
+    """
+    Оцінює кількість візуальних рядків, які займає параграф.
+    Порожній параграф = 1 рядок (займає висоту навіть якщо пустий).
+    """
+    if not text.strip():
+        return 1
+    return max(1, math.ceil(len(text) / chars_per_line))
+
+
+def _count_leading_visual_lines(annotated: list, chars_per_line: float) -> int:
+    """
+    Підраховує суму візуальних рядків у 'plain'-зоні до першого 'text'.
+    """
+    total = 0
     for e in annotated:
         if e['zone'] == 'text':
             break
-        count += 1
-    return count
+        total += _estimate_visual_lines(e['para'].text, chars_per_line)
+    return total
 
 
-def pad_left_to_match_right(left_annotated: list, right_annotated: list) -> list:
+def pad_left_to_match_right(
+    left_annotated: list,
+    right_annotated: list,
+    font_size: int,
+    right_cell_width_emu: int,
+) -> list:
     """
-    Якщо права ячейка має більше plain-рядків перед текстом, ніж ліва —
-    вставляємо різницю порожніх plain-рядків на початок лівої.
-    Це зрівнює вертикальний старт обох текстових зон.
+    Вставляє порожні рядки на початок лівої ячейки так, щоб перший 'text'-параграф
+    починався приблизно на тій самій висоті, що й перший 'text'-параграф правої.
+
+    right_cell_width_emu — ширина правої колонки в EMU (English Metric Units).
+    1 pt = 12700 EMU. Якщо ширина невідома — використовується fallback 400 pt.
     """
-    left_lead  = _count_leading_plain(left_annotated)
-    right_lead = _count_leading_plain(right_annotated)
-    padding    = right_lead - left_lead
+    cell_width_pt  = (right_cell_width_emu / 12700) if right_cell_width_emu else 400.0
+    avg_char_pt    = font_size * _CHAR_WIDTH_FACTOR
+    chars_per_line = max(1.0, cell_width_pt / avg_char_pt)
+
+    right_lines = _count_leading_visual_lines(right_annotated, chars_per_line)
+    left_lines  = _count_leading_visual_lines(left_annotated,  chars_per_line)
+    padding     = right_lines - left_lines
 
     if padding <= 0:
         return left_annotated
@@ -358,7 +388,10 @@ def process_document(
                 stats['warnings'] += 1
 
         # ── Вирівнювання: лівій ячейці додаємо порожні рядки зверху ─────────
-        left_annotated = pad_left_to_match_right(left_annotated, right_annotated)
+        right_width_emu = right_cell.width or 0
+        left_annotated = pad_left_to_match_right(
+            left_annotated, right_annotated, font_size, right_width_emu
+        )
 
         left_text_paras  = [e['para'] for e in left_annotated  if e['zone'] == 'text']
         right_text_paras = [e['para'] for e in right_annotated if e['zone'] == 'text']
